@@ -1,41 +1,68 @@
-# Import active directory module for running AD cmdlets
 Import-Module ActiveDirectory
-  
-# Store the data from NewUsersFinal.csv in the $ADUsers variable
-$ADUsers = Import-Csv -Path C:\Scripts\NewUsersSent.csv
 
-# Define UPN
-#$UPN = $User.UPN
+# ==============================
+# Configuration
+# ==============================
+$CsvPath = "C:\Scripts\NewUsersSent.csv"
+$LogPath = "C:\Scripts\AD_User_Creation.log"
 
-# Loop through each row containing user details in the CSV file
+# Mandatory fields (cannot be empty)
+$MandatoryFields = @(
+    "firstname",
+    "lastname",
+    "username",
+    "password",
+    "OU",
+    "Email"
+)
+
+# Start logging
+Start-Transcript -Path $LogPath -Append
+
+# Import CSV
+$ADUsers = Import-Csv -Path $CsvPath
+
 foreach ($User in $ADUsers) {
 
-    #Read user data from each field in each row and assign the data to a variable as below
-    $firstname = $User.firstname
-    $lastname = $User.lastname
-    $username = $User.username
-    $password = $User.password
-   
-   # Check to see if the user already exists in AD
-    if (Get-ADUser -F { SamAccountName -eq $username }) {
-        
-        # If user does exist, give a warning
-        Write-Warning "A user account with username $username already exists in Active Directory."
-    }
-    else {
+    Write-Host "Processing user: $($User.username)" -ForegroundColor Cyan
 
-        # User does not exist then proceed to create the new user account
-        # Account will be created in the OU provided by the $OU variable read from the CSV file
+    # ==============================
+    # Validate mandatory fields
+    # ==============================
+    $MissingFields = @()
+
+    foreach ($Field in $MandatoryFields) {
+        if ([string]::IsNullOrWhiteSpace($User.$Field)) {
+            $MissingFields += $Field
+        }
+    }
+
+    if ($MissingFields.Count -gt 0) {
+        Write-Warning "Skipping user [$($User.username)] - Missing mandatory fields: $($MissingFields -join ', ')"
+        continue
+    }
+
+    # ==============================
+    # Check if user exists
+    # ==============================
+    if (Get-ADUser -Filter "SamAccountName -eq '$($User.username)'" -ErrorAction SilentlyContinue) {
+        Write-Warning "User $($User.username) already exists. Skipping creation."
+        continue
+    }
+
+    # ==============================
+    # Create AD User
+    # ==============================
+    try {
         New-ADUser `
-            -SamAccountName $username `
-            -UserPrincipalName "$username@jmbaxigrp.com" `
-            -Name "$firstname $lastname" `
-            -GivenName $firstname `
-            -Surname $lastname `
-            -Enabled $True `
-            -DisplayName "$lastname $firstname" `
+            -SamAccountName $User.username `
+            -UserPrincipalName "$($User.username)@jmbaxigrp.com" `
+            -Name "$($User.firstname) $($User.lastname)" `
+            -GivenName $User.firstname `
+            -Surname $User.lastname `
+            -DisplayName "$($User.lastname) $($User.firstname)" `
             -Path $User.OU `
-            -City $User.City`
+            -City $User.City `
             -Company $User.Company `
             -Title $User.jobtitle `
             -Department $User.department `
@@ -43,10 +70,38 @@ foreach ($User in $ADUsers) {
             -State $User.State `
             -EmailAddress $User.Email `
             -Description $User.Description `
+            -Enabled $true `
+            -ChangePasswordAtLogon $true `
             -AccountPassword (ConvertTo-SecureString $User.password -AsPlainText -Force)
 
-        # If user is created, show message.
-        Write-Host "The user account $username is created." -ForegroundColor Cyan
+        Write-Host "User $($User.username) created successfully." -ForegroundColor Green
     }
- }
-Read-Host -Prompt "Press Enter to exit"
+    catch {
+        Write-Error "Failed to create user $($User.username): $_"
+        continue
+    }
+
+    # ==============================
+    # Group Assignment
+    # ==============================
+    if (-not [string]::IsNullOrWhiteSpace($User.Groups)) {
+
+        $Groups = $User.Groups -split ";"
+
+        foreach ($Group in $Groups) {
+            try {
+                Add-ADGroupMember -Identity $Group.Trim() -Members $User.username
+                Write-Host "Added $($User.username) to group $Group" -ForegroundColor Yellow
+            }
+            catch {
+                Write-Warning "Failed to add $($User.username) to group $Group : $_"
+            }
+        }
+    }
+    else {
+        Write-Warning "No groups specified for user $($User.username)"
+    }
+}
+
+Stop-Transcript
+Read-Host "Press Enter to exit"
